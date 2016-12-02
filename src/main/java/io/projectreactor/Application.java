@@ -1,22 +1,29 @@
 package io.projectreactor;
 
-import java.io.IOException;
-import java.lang.management.ManagementFactory;
-import java.nio.file.FileSystem;
-import java.nio.file.FileSystems;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.time.Duration;
-import java.util.Collections;
-import java.util.function.BiFunction;
+import java.net.URI;
 
-import org.reactivestreams.Publisher;
-import reactor.ipc.netty.NettyContext;
+import static org.springframework.http.HttpStatus.FOUND;
+import static org.springframework.web.reactive.function.RequestPredicates.GET;
+import static org.springframework.web.reactive.function.RouterFunctions.route;
+import static org.springframework.web.reactive.function.RouterFunctions.resources;
+import static org.springframework.web.reactive.function.ServerResponse.status;
+import reactor.core.publisher.Mono;
 import reactor.ipc.netty.http.server.HttpServer;
-import reactor.ipc.netty.http.server.HttpServerRequest;
-import reactor.ipc.netty.http.server.HttpServerResponse;
 
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.http.server.reactive.HttpHandler;
+import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpRequestDecorator;
+import org.springframework.web.reactive.function.RouterFunction;
+import org.springframework.web.reactive.function.RouterFunctions;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.WebFilter;
+import org.springframework.web.server.WebFilterChain;
+import org.springframework.web.server.WebHandler;
+import org.springframework.web.server.adapter.HttpWebHandlerAdapter;
+import org.springframework.web.server.adapter.WebHttpHandlerBuilder;
+import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * Main Application for the Project Reactor home site.
@@ -24,66 +31,69 @@ import org.springframework.core.io.ClassPathResource;
 public class Application {
 
 	public static void main(String... args) throws Exception {
-		Path p = resolveContentPath();
+		// TODO See with Arjen if we can expose a method to return a WebHandler since internally web deal with a HttpWebHandlerAdapter
+		WebHandler webHandler = (HttpWebHandlerAdapter)RouterFunctions.toHttpHandler(routes());
+		HttpHandler httpHandler = WebHttpHandlerBuilder.webHandler(webHandler).filters(new IndexWebFilter()).build();
 
-		HttpServer s = HttpServer.create("0.0.0.0");
-		s.newRouter(r -> r.file("/favicon.ico", p.resolve("favicon.ico"))
-		                  .get("/docs/api/**", rewrite("/docs/", "/old/"))
-		                  .get("/docs/reference/**", rewrite("/docs/", "/old/"))
-		                  .get("/docs/raw/**", rewrite("/docs/", "/old/"))
-		                  .get("/docs/{dir}/api", rewrite("api", "release"))
-		                  .get("/core/docs/reference/**", (req, resp) -> resp.sendRedirect("https://github.com/reactor/reactor-core/blob/master/README.md"))
-		                  .get("/ext/docs/api/**/adapter/**", rewrite("/ext/docs/", "/docs/adapter/release/"))
-		                  .get("/ipc/docs/api/**", rewrite("/ipc/docs/", "/docs/ipc/release/"))
-		                  .get("/ext/docs/api/**/test/**", rewrite("/ext/docs/", "/docs/test/release/"))
-		                  .get("/netty/docs/api/**", rewrite("/netty/docs/", "/docs/netty/release/"))
-		                  .index((req, res) -> res.sendFile(p.resolve(res.path())
-		                                                     .resolve("index.html")))
-		                  .directory("/docs", p.resolve("docs"))
-		                  .directory("/assets", p.resolve("assets"))
-		)
-
-		 .doOnNext(Application::startLog)
-		 .block()
-		 .onClose()
-		 .block();
-
+		HttpServer.create("0.0.0.0")
+			.newHandler(new ReactorHttpHandlerAdapter(httpHandler))
+				.doOnNext(foo -> System.out.println("Server listening on " + foo.address()))
+				.block()
+				.onClose()
+				.block();
 	}
 
-	static BiFunction<HttpServerRequest, HttpServerResponse, Publisher<Void>> rewrite(
-			String originalPath,
-			String newPath) {
-		return (req, resp) -> resp.sendRedirect(req.uri().replace(originalPath, newPath));
+	private static RouterFunction<?> routes() {
+		return route(GET("/docs/api/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/docs/", "/old/"))).build())
+			.andRoute(GET("/docs/reference/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/docs/", "/old/"))).build())
+			.andRoute(GET("/docs/raw/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/docs/", "/old/"))).build())
+			.andRoute(GET("/docs/{dir}/api"), request ->
+				status(FOUND).location(URI.create(request.path().replace("api", "release"))).build())
+			.andRoute(GET("/core/docs/reference/**"), request ->
+				status(FOUND).location(URI.create("https://github.com/reactor/reactor-core/blob/master/README.md")).build())
+			.andRoute(GET("/core/docs/api/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/core/docs/","/docs/core/release/"))).build())
+			.andRoute(GET("/netty/docs/api/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/netty/docs/","/docs/netty/release/"))).build())
+			.andRoute(GET("/ipc/docs/api/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/ipc/docs/", "/docs/ipc/release/"))).build())
+			.andRoute(GET("/ext/docs/api/**/test/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/ext/docs/", "/docs/test/release/"))).build())
+			.andRoute(GET("/ext/docs/api/**/adapter/**"), request ->
+				status(FOUND).location(URI.create(request.path().replace("/ext/docs/", "/docs/adapter/release/"))).build())
+			.and(resources("/**", new ClassPathResource("static/")))
+			;
 	}
 
-	static void startLog(NettyContext c) {
-		System.out.printf("Server started in %d ms on: %s\n",
-				Duration.ofNanos(ManagementFactory.getThreadMXBean()
-				                                  .getThreadCpuTime(Thread.currentThread()
-				                                                          .getId()))
-				        .toMillis(),
-				c.address());
-	}
+	private static class IndexWebFilter implements WebFilter {
 
-	static Path resolveContentPath() throws Exception {
-		ClassPathResource cp = new ClassPathResource("static");
-
-		if (cp.isFile()) {
-			return Paths.get(cp.getURI());
+		@Override
+		public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+			ServerHttpRequest request = exchange.getRequest();
+			return request.getURI().getPath().endsWith("/") ?
+				chain.filter(exchange.mutate().setRequest(new IndexServerHttpRequestDecorator(request)).build()) :
+				chain.filter(exchange);
 		}
 
-		FileSystem fs = FileSystems.newFileSystem(cp.getURI(), Collections.emptyMap());
+		static class IndexServerHttpRequestDecorator extends ServerHttpRequestDecorator {
 
-		Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-			try{
-				fs.close();
+			public IndexServerHttpRequestDecorator(ServerHttpRequest delegate) {
+				super(delegate);
 			}
-			catch (IOException io){
-				//ignore
-			}
-		}));
 
-		return fs.getPath("BOOT-INF/classes/static");
+			@Override
+			public URI getURI() {
+				URI uri = super.getURI();
+				return UriComponentsBuilder.fromUri(uri).path("index.html").build().toUri();
+			}
+		}
+
+
+
 	}
+
 
 }
